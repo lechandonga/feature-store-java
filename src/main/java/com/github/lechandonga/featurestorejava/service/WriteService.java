@@ -63,12 +63,23 @@ public class WriteService {
         try {
             def = registry.requireVersion(batch.featureSet(),
                     batch.version() == 0 ? null : batch.version());
-        } catch (NotFoundException e) {
-            RejectionReason reason = batch.version() == 0
-                    ? RejectionReason.FEATURE_SET_NOT_FOUND
-                    : RejectionReason.VERSION_MISMATCH;
+        } catch (NotFoundException missing) {
+            // distinguish "no such feature set" from "exists but wrong version"
+            FeatureSetDef existing = state.registry().getLatest(batch.featureSet());
+            boolean setExists = existing != null;
+            RejectionReason reason = setExists
+                    ? RejectionReason.VERSION_MISMATCH
+                    : RejectionReason.FEATURE_SET_NOT_FOUND;
+            String detail = setExists
+                    ? "feature set '" + batch.featureSet() + "' latest version is "
+                            + existing.version() + ", batch targets " + batch.version()
+                    : missing.getMessage();
+            Map<String, Object> evidence = new LinkedHashMap<>();
+            if (setExists) {
+                evidence.put("latestVersion", existing.version());
+            }
             throw new BatchRejectedException(batch.featureSet(), batch.version(),
-                    List.of(reject(-1, null, null, reason, e.getMessage(), Map.of())));
+                    List.of(reject(-1, null, null, reason, detail, evidence)));
         }
 
         List<RowRejection> rejections = new ArrayList<>();
