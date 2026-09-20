@@ -84,6 +84,7 @@ public class WriteService {
 
         List<RowRejection> rejections = new ArrayList<>();
         List<StoredPoint> accepted;
+        boolean committed = false;
 
         // Validation and commit run inside ONE write-lock critical section.
         // Splitting them (read-lock validate, then write-lock commit) would open
@@ -117,9 +118,13 @@ public class WriteService {
             audit.record("WRITE", def.name(), def.version(), null, null, "ACCEPTED",
                     "batch committed atomically",
                     Map.of("rows", ids.size(), "ingestTime", ingestTime, "pointIds", ids));
+            committed = true;
             return new WriteResult(points.size(), List.copyOf(ids));
         } finally {
             state.lock().writeLock().unlock();
+            if (committed) {
+                state.notifyCommit();
+            }
         }
     }
 

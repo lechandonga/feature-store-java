@@ -76,6 +76,7 @@ public class BackfillService {
                             e.getMessage(), Map.of())));
         }
 
+        boolean committed = false;
         state.lock().writeLock().lock();
         try {
             // idempotent replay of a completed recompute job
@@ -120,9 +121,13 @@ public class BackfillService {
                     Map.of("corrections", ids.size(), "ingestTime", ingestTime,
                             "pointIds", ids,
                             "correlationId", String.valueOf(request.correlationId())));
+            committed = true;
             return new BackfillResult(appended.size(), List.copyOf(ids));
         } finally {
             state.lock().writeLock().unlock();
+            if (committed) {
+                state.notifyCommit();
+            }
         }
     }
 
