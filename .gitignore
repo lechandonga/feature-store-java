@@ -39,3 +39,4 @@ build/
 .DS_Store
 ### Feature store local snapshot ###
 data/
+logs/
