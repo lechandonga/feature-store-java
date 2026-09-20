@@ -239,9 +239,16 @@ public class BackfillService {
     }
 
     private BatchRejectedException rejected(FeatureSetDef def, List<RowRejection> rejections) {
+        for (RowRejection r : rejections) {
+            Map<String, Object> evidence = new LinkedHashMap<>(r.evidence());
+            evidence.put("rowIndex", r.rowIndex());
+            audit.record("BACKFILL_ROW", def.name(), def.version(), r.entity(), r.eventTime(),
+                    "REJECTED", r.reason().name() + ": " + r.detail(), evidence);
+        }
         audit.record("BACKFILL", def.name(), def.version(), null, null, "REJECTED",
-                "backfill validation failed; state unchanged",
-                Map.of("violations", rejections.size(), "rejections", describe(rejections)));
+                "backfill validation failed; state unchanged (" + rejections.size()
+                        + " violation(s))",
+                Map.of("violations", rejections.size()));
         return new BatchRejectedException(def.name(), def.version(), rejections);
     }
 
@@ -249,19 +256,5 @@ public class BackfillService {
                                        RejectionReason reason, String detail,
                                        Map<String, Object> evidence) {
         return new RowRejection(rowIndex, entity, eventTime, reason, detail, Map.copyOf(evidence));
-    }
-
-    private List<Map<String, Object>> describe(List<RowRejection> rejections) {
-        List<Map<String, Object>> out = new ArrayList<>();
-        for (RowRejection r : rejections) {
-            Map<String, Object> m = new LinkedHashMap<>(r.evidence());
-            m.put("rowIndex", r.rowIndex());
-            m.put("entity", r.entity());
-            m.put("eventTime", r.eventTime());
-            m.put("reason", r.reason().name());
-            m.put("detail", r.detail());
-            out.add(m);
-        }
-        return out;
     }
 }
