@@ -84,6 +84,29 @@ public class ReadService {
         return List.copyOf(results);
     }
 
+    /**
+     * Resolve the online and offline views for one target against the SAME
+     * snapshot inside a single read-lock critical section. This is the only
+     * correct way to compare the two paths concurrently: taking two separate
+     * locks would let a commit land between the reads and produce a false
+     * VALUE_MISMATCH rather than a genuine divergence.
+     */
+    public OnlineOfflinePair resolveBoth(FeatureSetDef def, String entity, long asOf) {
+        state.lock().readLock().lock();
+        try {
+            Map<String, FeatureValue> online = resolve(def, entity, asOf, true);
+            Map<String, FeatureValue> offline = resolve(def, entity, asOf, false);
+            return new OnlineOfflinePair(online, offline);
+        } finally {
+            state.lock().readLock().unlock();
+        }
+    }
+
+    /** Online and offline feature maps computed over one consistent snapshot. */
+    public record OnlineOfflinePair(Map<String, FeatureValue> online,
+                                    Map<String, FeatureValue> offline) {
+    }
+
     // ---- core resolution ------------------------------------------------
 
     /**

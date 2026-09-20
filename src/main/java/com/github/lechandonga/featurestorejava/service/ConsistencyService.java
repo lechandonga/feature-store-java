@@ -49,18 +49,19 @@ public class ConsistencyService {
             targets = List.of();
         }
         for (EntityAtPoint target : targets) {
-            OnlineResult online = reads.online(def.name(), def.version(),
-                    target.entity(), target.asOfTime());
-            OfflineResult offline = reads.offline(def.name(), def.version(),
-                    List.of(target)).get(0);
+            // both views come from one snapshot / one read-lock critical section
+            ReadService.OnlineOfflinePair pair =
+                    reads.resolveBoth(def, target.entity(), target.asOfTime());
+            Map<String, FeatureValue> onlineMap = pair.online();
+            Map<String, FeatureValue> offlineMap = pair.offline();
 
             Set<String> featureNames = new LinkedHashSet<>();
-            featureNames.addAll(online.features().keySet());
-            featureNames.addAll(offline.features().keySet());
+            featureNames.addAll(onlineMap.keySet());
+            featureNames.addAll(offlineMap.keySet());
 
             for (String feature : featureNames) {
-                FeatureValue o = online.features().get(feature);
-                FeatureValue f = offline.features().get(feature);
+                FeatureValue o = onlineMap.get(feature);
+                FeatureValue f = offlineMap.get(feature);
                 ConsistencyIssue issue = compare(target, feature, o, f);
                 if (issue != null) {
                     issues.add(issue);
