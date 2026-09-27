@@ -1,6 +1,7 @@
 package com.github.lechandonga.featurestorejava.service;
 
 import com.github.lechandonga.featurestorejava.error.BatchRejectedException;
+import com.github.lechandonga.featurestorejava.error.CapacityExceededException;
 import com.github.lechandonga.featurestorejava.error.NotFoundException;
 import com.github.lechandonga.featurestorejava.model.FeatureDef;
 import com.github.lechandonga.featurestorejava.model.FeatureSetDef;
@@ -10,6 +11,7 @@ import com.github.lechandonga.featurestorejava.model.StoredPoint;
 import com.github.lechandonga.featurestorejava.model.WriteBatch;
 import com.github.lechandonga.featurestorejava.model.WriteResult;
 import com.github.lechandonga.featurestorejava.model.WriteRow;
+import com.github.lechandonga.featurestorejava.workspace.WorkspaceManager;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -19,10 +21,10 @@ import java.util.TreeMap;
 import java.util.UUID;
 
 /**
- * Atomic, schema-validated feature ingestion.
+ * Atomic, schema-validated feature ingestion within one workspace.
  *
  * <p>Validation happens <em>before</em> any state change, against a consistent
- * read-locked snapshot. A batch is rejected as a whole — leaving zero partial
+ * write-locked snapshot. A batch is rejected as a whole — leaving zero partial
  * data — when any row:
  * <ul>
  *   <li>misses the entity key or a required field;</li>
@@ -37,31 +39,46 @@ import java.util.UUID;
  *
  * <p>Late-arriving data (an event time older than stored points) is accepted:
  * as-of filtering keeps it invisible to past time points, so it can never leak.
+ *
+ * <p>The workspace historical-points capacity limit is checked inside the same
+ * write-lock critical section, <em>after</em> validation and <em>before</em>
+ * any append: when {@code currentPoints + batchRows > maxPoints} the whole
+ * batch is rejected and nothing is partially written. A missing workspace is a
+ * distinguishable {@code FEATURE_SET_NOT_FOUND}-style precondition failure.
  */
 public class WriteService {
 
-    private final StoreState state;
-    private final FeatureRegistry registry;
-    private final AuditLog audit;
+    private final WorkspaceManager workspaces;
+    private final FeatureRegistry registryService;
     private final TimeSource time;
 
-    public WriteService(StoreState state, FeatureRegistry registry, AuditLog audit, TimeSource time) {
-        this.state = state;
-        this.registry = registry;
-        this.audit = audit;
+    public WriteService(WorkspaceManager workspaces, FeatureRegistry registry, TimeSource time) {
+        this.workspaces = workspaces;
+        this.registryService = registry;
         this.time = time;
     }
 
+    /** Backward-compatible constructor: operates against the default workspace. */
+    public WriteService(StoreState state, FeatureRegistry registry, AuditLog audit, TimeSource time) {
+        this(WorkspaceManager.wrappingDefault(state, time), registry, time);
+    }
+
     public WriteResult submit(WriteBatch batch) {
+        return submit(WorkspaceManager.DEFAULT_WORKSPACE, batch);
+    }
+
+    public WriteResult submit(String workspace, WriteBatch batch) {
+        String ws = WorkspaceManager.resolve(workspace);
+        StoreState state = workspaces.requireState(ws);
         if (batch == null) {
-            throw new BatchRejectedException(null, null,
+            throw new BatchRejectedException(ws, null, null,
                     List.of(reject(-1, null, null, RejectionReason.EMPTY_BATCH,
                             "request body is required", Map.of())));
         }
         // resolve the definition up front (distinct failure mode from row violations)
         FeatureSetDef def;
         try {
-            def = registry.requireVersion(batch.featureSet(),
+            def = registryService.requireVersion(ws, batch.featureSet(),
                     batch.version() == 0 ? null : batch.version());
         } catch (NotFoundException missing) {
             // distinguish "no such feature set" from "exists but wrong version"
@@ -72,13 +89,15 @@ public class WriteService {
                     : RejectionReason.FEATURE_SET_NOT_FOUND;
             String detail = setExists
                     ? "feature set '" + batch.featureSet() + "' latest version is "
-                            + existing.version() + ", batch targets " + batch.version()
+                            + existing.version() + " in workspace '" + ws
+                            + "', batch targets " + batch.version()
                     : missing.getMessage();
             Map<String, Object> evidence = new LinkedHashMap<>();
+            evidence.put("workspace", ws);
             if (setExists) {
                 evidence.put("latestVersion", existing.version());
             }
-            throw new BatchRejectedException(batch.featureSet(), batch.version(),
+            throw new BatchRejectedException(ws, batch.featureSet(), batch.version(),
                     List.of(reject(-1, null, null, reason, detail, evidence)));
         }
 
@@ -89,18 +108,21 @@ public class WriteService {
         // Validation and commit run inside ONE write-lock critical section.
         // Splitting them (read-lock validate, then write-lock commit) would open
         // a TOCTOU window where a concurrent writer commits the same
-        // (entity, eventTime) between check and insert.
+        // (entity, eventTime) between check and insert, or consumes capacity.
         state.lock().writeLock().lock();
         try {
             if (batch.rows() == null || batch.rows().isEmpty()) {
-                throw rejected(def, List.of(reject(-1, null, null,
+                throw rejected(state, ws, def, List.of(reject(-1, null, null,
                         RejectionReason.EMPTY_BATCH, "a batch must contain at least one row",
                         Map.of())));
             }
-            accepted = validate(def, batch.rows(), rejections);
+            accepted = validate(state, def, batch.rows(), rejections);
             if (!rejections.isEmpty()) {
-                throw rejected(def, rejections);
+                throw rejected(state, ws, def, rejections);
             }
+            // capacity: projected point count must fit, or the ENTIRE batch fails
+            checkPointsCapacity(state, ws, def, accepted.size(),
+                    firstEntity(accepted), accepted.get(0).eventTime());
 
             // atomic commit: all offline appends and the online chain swap
             long ingestTime = time.now();
@@ -115,9 +137,10 @@ public class WriteService {
                 ids.add(stored.id());
             }
             state.online().applyBatch(def.name(), def.version(), points);
-            audit.record("WRITE", def.name(), def.version(), null, null, "ACCEPTED",
+            state.audit().record(ws, "WRITE", def.name(), def.version(), null, null, "ACCEPTED",
                     "batch committed atomically",
-                    Map.of("rows", ids.size(), "ingestTime", ingestTime, "pointIds", ids));
+                    Map.of("workspace", ws, "rows", ids.size(), "ingestTime", ingestTime,
+                            "pointIds", ids));
             committed = true;
             return new WriteResult(points.size(), List.copyOf(ids));
         } finally {
@@ -128,9 +151,38 @@ public class WriteService {
         }
     }
 
+    private static String firstEntity(List<StoredPoint> points) {
+        return points.isEmpty() ? null : points.get(0).entity();
+    }
+
+    private void checkPointsCapacity(StoreState state, String ws, FeatureSetDef def,
+                                     int requested, String entity, Long eventTime) {
+        com.github.lechandonga.featurestorejava.model.WorkspaceLimits limits =
+                workspaces.require(ws).info().limits();
+        if (limits.maxPoints() == null) {
+            return;
+        }
+        long limit = limits.maxPoints();
+        long current = state.offline().totalPoints();
+        if (current + requested > limit) {
+            Map<String, Object> evidence = new LinkedHashMap<>();
+            evidence.put("workspace", ws);
+            evidence.put("featureSet", def.name());
+            evidence.put("version", def.version());
+            evidence.put("entity", entity);
+            evidence.put("eventTime", eventTime);
+            evidence.put("batchRows", requested);
+            state.audit().record(ws, "WRITE", def.name(), def.version(), entity, eventTime,
+                    "REJECTED", "workspace historical-points capacity exceeded; batch rejected "
+                            + "as a whole, state unchanged", evidence);
+            throw new CapacityExceededException(ws, def.name(), def.version(), "POINTS",
+                    limit, current, requested, evidence);
+        }
+    }
+
     // ---- validation -----------------------------------------------------
 
-    private List<StoredPoint> validate(FeatureSetDef def, List<WriteRow> rows,
+    private List<StoredPoint> validate(StoreState state, FeatureSetDef def, List<WriteRow> rows,
                                        List<RowRejection> rejections) {
         Map<String, FeatureDef> declared = new LinkedHashMap<>();
         for (FeatureDef f : def.features()) {
@@ -259,20 +311,21 @@ public class WriteService {
         return accepted;
     }
 
-    private BatchRejectedException rejected(FeatureSetDef def, List<RowRejection> rejections) {
+    private BatchRejectedException rejected(StoreState state, String ws, FeatureSetDef def,
+                                            List<RowRejection> rejections) {
         // one explainable entry per offending row: carries entity, time point,
         // distinguishable reason and the row's position
         for (RowRejection r : rejections) {
             Map<String, Object> evidence = new LinkedHashMap<>(r.evidence());
             evidence.put("rowIndex", r.rowIndex());
-            audit.record("WRITE_ROW", def.name(), def.version(), r.entity(), r.eventTime(),
-                    "REJECTED", r.reason().name() + ": " + r.detail(), evidence);
+            state.audit().record(ws, "WRITE_ROW", def.name(), def.version(), r.entity(),
+                    r.eventTime(), "REJECTED", r.reason().name() + ": " + r.detail(), evidence);
         }
-        audit.record("WRITE", def.name(), def.version(), null, null, "REJECTED",
+        state.audit().record(ws, "WRITE", def.name(), def.version(), null, null, "REJECTED",
                 "batch validation failed; no row applied (" + rejections.size()
                         + " violation(s))",
-                Map.of("violations", rejections.size()));
-        return new BatchRejectedException(def.name(), def.version(), rejections);
+                Map.of("workspace", ws, "violations", rejections.size()));
+        return new BatchRejectedException(ws, def.name(), def.version(), rejections);
     }
 
     private static RowRejection reject(int rowIndex, String entity, Long eventTime,

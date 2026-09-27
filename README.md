@@ -9,7 +9,10 @@
 - **时间点正确（point-in-time correct）**：离线样本只能看到该时间点“当时已知”的值，
   未来数据、迟到写入、回填修正都不会造成标签泄漏；
 - **回填可重算且不抖动**：重算以追加修正点的方式进行，在线视图按批原子切换；
-- **可解释、可观测**：每个判定都进审计日志（含实体、时间点、原因），过期 / 缺失显式上报，
+- **多团队工作区隔离**：通过 `X-Workspace` 在命名空间间隔离注册表、数据、
+  修正、审计与统计，支持每工作区容量上限；不带工作区的旧调用全部走
+  `default` 工作区，行为不变（见第 8 节）；
+- **可解释、可观测**：每个判定都进审计日志（含工作区、实体、时间点、原因），过期 / 缺失显式上报，
   绝不静默返回默认值。
 
 ---
@@ -173,11 +176,110 @@ eventTime <= T  AND  ingestTime <= T
 
 ---
 
-## 8. HTTP API 一览
+## 8. 工作区（命名空间）隔离
+
+多个团队 / 环境可在同一进程里共用本服务，彼此完全隔离。
+
+### 8.1 选择工作区：`X-Workspace` 请求头
+
+除工作区管理接口外，**所有**数据接口（注册、演进、写入、在线 / 离线读、回填、
+一致性、新鲜度 / 覆盖率、审计）都接受可选请求头：
+
+```
+X-Workspace: team-a
+```
+
+- 带头时，操作严格发生在该工作区内；
+- **不带头（或为空）时，一律落到内置的 `default` 工作区**，因此升级前的
+  所有旧调用（不传工作区）行为与返回完全不变。
+
+每个工作区各自独立拥有：特征集注册表与版本链、全部历史点（离线）、在线链、
+回填修正关系（`supersedes`）、correlationId 幂等表、审计记录以及新鲜度 /
+覆盖率统计。不同工作区之间不共享锁、缓存或任何数据。
+
+**同名特征集可以在不同工作区注册成完全不同的定义**（不同实体键、特征、类型），
+互不冲突、互不可见。
+
+### 8.2 创建 / 列出 / 查看用量
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/features` | 注册特征集 v1 |
+| POST | `/api/workspaces` | 创建工作区，可带容量上限 |
+| GET  | `/api/workspaces` | 列出全部工作区（元数据 + 上限） |
+| GET  | `/api/workspaces/current` | `X-Workspace` 当前选中工作区的元数据 |
+| GET  | `/api/workspaces/usage` | 当前工作区的用量与上限 |
+
+创建请求体：
+
+```json
+{
+  "name": "team-a",
+  "limits": { "maxFeatureSets": 50, "maxPoints": 1000000 }
+}
+```
+
+- 名字必填，规则为 `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`；非法名字返回 `400 BAD_REQUEST`；
+- 重名创建返回 `409 WORKSPACE_CONFLICT`，已有配置与数据原样保留；
+- `limits` 的两个维度均可省略 / 为 `null`，表示该维度不限；
+- `default` 工作区始终存在，无需创建。
+
+### 8.3 容量约束（整批拒绝，不留部分改动）
+
+每个工作区有两个独立维度的上限：
+
+- `maxFeatureSets`：可注册的**不同特征集名称数**（版本演进不新增特征集，不受限）；
+- `maxPoints`：该工作区**落库历史点总数**（所有特征集 / 版本的写入点与回填修正点之和）。
+
+判定时机都在对应工作区的写锁临界区内、**任何变更之前**：
+
+- 注册：当 `当前特征集数 + 1 > maxFeatureSets` 时拒绝；
+- 写入：先完成全部行校验，再当 `当前点数 + 本批行数 > maxPoints` 时**整批拒绝**；
+- 回填：幂等重放不计数、不拒绝；新作业当 `当前点数 + 修正条数 > maxPoints`
+  时**整批拒绝**。
+
+超限返回 `422 CAPACITY_EXCEEDED`，响应体给出判定所需的全部信息：
+`workspace / featureSet / version / dimension(FEATURE_SETS|POINTS) / limit /
+currentUsage / requested / basis`，写入 / 回填场景还带首个 `entity / eventTime`。
+超限时没有任何行、点或版本被部分写入；其他工作区不受任何影响。
+
+查询用量：
+
+```bash
+curl -s localhost:8080/api/workspaces/usage -H 'X-Workspace: team-a'
+# {"workspace":"team-a","featureSets":2,"points":137,"limits":{"maxFeatureSets":50,"maxPoints":1000000}}
+```
+
+### 8.4 跨工作区访问与错误区分
+
+- 操作一个**不存在的工作区**：`404 WORKSPACE_NOT_FOUND`（区别于工作区内
+  特征集不存在的 `404 NOT_FOUND` / 写入侧 `FEATURE_SET_NOT_FOUND`）；
+- 回填的 `targetPointId` 指向**别的工作区**拥有的点：整批拒绝
+  `422 BATCH_REJECTED`，该行原因是 `CROSS_WORKSPACE_ACCESS`，
+  evidence 里同时给出 `ownerWorkspace` 与 `requestedWorkspace`；
+- 点 id 在任何工作区都不存在：`TARGET_POINT_NOT_FOUND`，与跨空间访问明确区分。
+
+### 8.5 并发与重启语义
+
+- 每个工作区有独立的读写锁：多工作区并发写入 / 回填与在线 / 离线读取时，
+  任一次读取只会看到某次提交**前或后的完整状态**，看不到半更新，也不会串到
+  别的工作区；
+- 快照升级为 **v2（workspaces）** 信封：工作区清单、容量配置、每个工作区的
+  定义 / 历史点 / 修正关系、correlationId 幂等结果都会在重启后恢复；
+- **升级兼容**：旧版本写出的 v1 快照（`{"definitions":...,"points":...}`）
+  在启动时自动整体归入 `default` 工作区，旧数据照常可读；在其他工作区注册
+  同名特征集不会与这些旧数据冲突（也不会误判为重复）。
+
+---
+
+## 9. HTTP API 一览
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/workspaces` | 创建工作区（可带 `limits` 容量上限） |
+| GET  | `/api/workspaces` | 列出工作区 |
+| GET  | `/api/workspaces/current` | 当前（`X-Workspace`）工作区元数据 |
+| GET  | `/api/workspaces/usage` | 当前工作区用量 / 上限 |
+| POST | `/api/features` | 注册特征集 v1（可带 `X-Workspace`） |
 | POST | `/api/features/{name}/versions?ttlMillis=` | 兼容演进，生成下一版本 |
 | GET  | `/api/features/{name}/versions/{version}` | 查看某版本定义 |
 | POST | `/api/write` | 原子批量写入 |
@@ -187,18 +289,29 @@ eventTime <= T  AND  ingestTime <= T
 | POST | `/api/backfill` | 回填 / 重算（可带 correlationId） |
 | GET  | `/api/ops/freshness/{set}?version=&asOf=` | 新鲜度 |
 | GET  | `/api/ops/coverage/{set}?version=&asOf=` | 覆盖率 |
-| GET  | `/api/ops/audit?limit=` | 最近审计条目 |
+| GET  | `/api/ops/audit?limit=` | 当前工作区最近审计条目 |
 
-错误以结构化 JSON 返回：定义冲突 `409 DEFINITION_CONFLICT`，
-批次拒绝 `422 BATCH_REJECTED`（含每行 `reason/detail/evidence`），未找到 `404 NOT_FOUND`。
+错误以结构化 JSON 返回：
+
+- 定义冲突 `409 DEFINITION_CONFLICT`，工作区重名 `409 WORKSPACE_CONFLICT`；
+- 批次拒绝 `422 BATCH_REJECTED`（含每行 `reason/detail/evidence`，
+  跨工作区回填为 `CROSS_WORKSPACE_ACCESS`）；
+- 容量超限 `422 CAPACITY_EXCEEDED`（含维度 / 上限 / 当前用量 / 申请量 / 判定依据）；
+- 工作区不存在 `404 WORKSPACE_NOT_FOUND`，特征集 / 版本 / 点不存在 `404 NOT_FOUND`；
+- 非法工作区名或容量值 `400 BAD_REQUEST`。
 
 ---
 
-## 9. 端到端示例
+## 10. 端到端示例
 
 ```bash
-# 1) 注册
-curl -s -X POST localhost:8080/api/features -H 'Content-Type: application/json' -d '{
+# 0) 创建带容量上限的工作区
+curl -s -X POST localhost:8080/api/workspaces -H 'Content-Type: application/json' -d '{
+  "name":"team-a","limits":{"maxFeatureSets":50,"maxPoints":1000000}}'
+
+# 1) 注册（注意 X-Workspace 头；不带头则写入 default 工作区）
+curl -s -X POST localhost:8080/api/features -H 'X-Workspace: team-a' \
+  -H 'Content-Type: application/json' -d '{
   "name":"user","entityKey":"uid","ttlMillis":null,
   "features":[
     {"name":"age","type":"LONG","required":true,"defaultValue":0,"missingPolicy":"DEFAULT","description":""},
@@ -206,21 +319,24 @@ curl -s -X POST localhost:8080/api/features -H 'Content-Type: application/json' 
   ],"description":""}'
 
 # 2) 写入
-curl -s -X POST localhost:8080/api/write -H 'Content-Type: application/json' -d '{
+curl -s -X POST localhost:8080/api/write -H 'X-Workspace: team-a' \
+  -H 'Content-Type: application/json' -d '{
   "featureSet":"user","version":1,
   "rows":[{"eventTime":1000,"fields":{"uid":"u1","age":30,"score":0.9}}]}'
 
 # 3) 在线读（asOf 给一个足够晚的毫秒时间）
-curl -s "localhost:8080/api/read/online/user/entities/u1?version=1&asOf=9999999999999"
+curl -s -H 'X-Workspace: team-a' \
+  "localhost:8080/api/read/online/user/entities/u1?version=1&asOf=9999999999999"
 
 # 4) 离线时间点读
-curl -s -X POST "localhost:8080/api/read/offline/user?version=1" \
+curl -s -X POST -H 'X-Workspace: team-a' \
+  "localhost:8080/api/read/offline/user?version=1" \
   -H 'Content-Type: application/json' -d '[{"entity":"u1","asOfTime":9999999999999}]'
 ```
 
 ---
 
-## 10. 如何验证（测试地图）
+## 11. 如何验证（测试地图）
 
 测试位于 `src/test/.../tests`，使用可手动控制的 `FixedTimeSource` 让时间线确定可复现：
 
@@ -235,4 +351,25 @@ curl -s -X POST "localhost:8080/api/read/offline/user?version=1" \
 - `ConsistencyObservabilityTest`：一致性报告、TTL `EXPIRED` 显式上报、覆盖率统计；
 - `AuditLogTest`：审计含实体 / 时间点 / 原因，可按实体过滤；
 - `FeatureStoreApiIntegrationTest`：完整 HTTP 生命周期与 409/422/404 映射；
-- `PersistenceRoundTripTest`：落盘后用全新实例重放，含修正值且历史视图一致。
+- `PersistenceRoundTripTest`：落盘后用全新实例重放，含修正值且历史视图一致；
+- `WorkspaceIsolationTest`：同名特征集跨工作区注册 / 读写 / 观测隔离、
+  工作区不存在、重名 409、`FEATURE_SETS` 与 `POINTS` 两个维度超限后的
+  **整批拒绝与状态不变**、跨工作区回填 `CROSS_WORKSPACE_ACCESS`
+  （与未知点 `TARGET_POINT_NOT_FOUND` 区分）、默认工作区旧调用形态兼容；
+- `WorkspaceConcurrencyTest`：两个工作区并发写入 / 回填 / 在线离线读取，
+  持续校验一致性、值域不串空间、实体集合各自独立、无半更新；
+- `WorkspaceRecoveryTest`：重启后工作区清单 / 容量配置 / 数据 / 修正关系 /
+  correlationId 幂等结果恢复，且**旧版 v1 快照自动归入 `default` 工作区、
+  与新工作区同名特征集不冲突**；
+- `WorkspaceApiIntegrationTest`：HTTP 端到端验证 `X-Workspace` 选择、
+  创建 / 列表 / 用量、404/409/422 错误体中的维度与判定依据。
+
+快速验证命令：
+
+```bash
+mvn test                       # 全量 58 个用例
+mvn test -Dtest=WorkspaceIsolationTest
+mvn test -Dtest=WorkspaceConcurrencyTest
+mvn test -Dtest=WorkspaceRecoveryTest
+mvn test -Dtest=WorkspaceApiIntegrationTest
+```

@@ -9,6 +9,7 @@ import com.github.lechandonga.featurestorejava.model.FeatureValue;
 import com.github.lechandonga.featurestorejava.model.OfflineResult;
 import com.github.lechandonga.featurestorejava.model.OnlineResult;
 import com.github.lechandonga.featurestorejava.model.ValueStatus;
+import com.github.lechandonga.featurestorejava.workspace.WorkspaceManager;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -43,7 +44,13 @@ public class ConsistencyService {
 
     public ConsistencyReport check(String featureSet, Integer version,
                                    List<EntityAtPoint> targets) {
-        FeatureSetDef def = registry.requireVersion(featureSet, version);
+        return check(WorkspaceManager.DEFAULT_WORKSPACE, featureSet, version, targets);
+    }
+
+    public ConsistencyReport check(String workspace, String featureSet, Integer version,
+                                   List<EntityAtPoint> targets) {
+        String ws = WorkspaceManager.resolve(workspace);
+        FeatureSetDef def = registry.requireVersion(ws, featureSet, version);
         List<ConsistencyIssue> issues = new ArrayList<>();
         if (targets == null) {
             targets = List.of();
@@ -51,7 +58,7 @@ public class ConsistencyService {
         for (EntityAtPoint target : targets) {
             // both views come from one snapshot / one read-lock critical section
             ReadService.OnlineOfflinePair pair =
-                    reads.resolveBoth(def, target.entity(), target.asOfTime());
+                    reads.resolveBoth(ws, def, target.entity(), target.asOfTime());
             Map<String, FeatureValue> onlineMap = pair.online();
             Map<String, FeatureValue> offlineMap = pair.offline();
 

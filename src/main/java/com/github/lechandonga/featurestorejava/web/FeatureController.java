@@ -7,6 +7,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -27,19 +28,25 @@ public class FeatureController {
     }
 
     @PostMapping
-    public FeatureSetDef register(@RequestBody RegisterRequest request) {
-        return registry.register(request);
+    public FeatureSetDef register(
+            @RequestHeader(value = "X-Workspace", required = false) String workspace,
+            @RequestBody RegisterRequest request) {
+        return registry.register(workspace, request);
     }
 
     @PostMapping("/{name}/versions")
-    public FeatureSetDef evolve(@PathVariable String name,
-                                @RequestParam(required = false) Long ttlMillis,
-                                @RequestBody List<com.github.lechandonga.featurestorejava.model.FeatureDef> features) {
-        return registry.evolve(name, features, ttlMillis);
+    public FeatureSetDef evolve(
+            @RequestHeader(value = "X-Workspace", required = false) String workspace,
+            @PathVariable String name,
+            @RequestParam(required = false) Long ttlMillis,
+            @RequestBody List<com.github.lechandonga.featurestorejava.model.FeatureDef> features) {
+        return registry.evolve(workspace, name, features, ttlMillis);
     }
 
     @GetMapping("/{name}/versions/{version}")
-    public FeatureSetDef version(@PathVariable String name, @PathVariable int version) {
-        return registry.requireVersion(name, version);
+    public FeatureSetDef version(
+            @RequestHeader(value = "X-Workspace", required = false) String workspace,
+            @PathVariable String name, @PathVariable int version) {
+        return registry.requireVersion(workspace, name, version);
     }
 }

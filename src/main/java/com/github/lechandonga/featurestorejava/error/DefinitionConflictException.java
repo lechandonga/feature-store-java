@@ -8,13 +8,25 @@ import java.util.List;
  */
 public class DefinitionConflictException extends RuntimeException {
 
+    private final String workspace;
     private final String featureSet;
     private final List<ConflictDetail> conflicts;
 
     public DefinitionConflictException(String featureSet, List<ConflictDetail> conflicts) {
-        super("feature set '" + featureSet + "' has " + conflicts.size() + " definition conflict(s)");
+        this(null, featureSet, conflicts);
+    }
+
+    public DefinitionConflictException(String workspace, String featureSet,
+                                       List<ConflictDetail> conflicts) {
+        super("feature set '" + featureSet + "' in workspace '" + workspace + "' has "
+                + conflicts.size() + " definition conflict(s)");
+        this.workspace = workspace;
         this.featureSet = featureSet;
         this.conflicts = List.copyOf(conflicts);
+    }
+
+    public String getWorkspace() {
+        return workspace;
     }
 
     public String getFeatureSet() {

@@ -49,8 +49,12 @@ public class RegistryStore {
         return List.copyOf(versions.values());
     }
 
-    public List<FeatureSetDef> allLatest() {
-        List<FeatureSetDef> latest = new ArrayList<>();
+    /** Number of distinct registered feature set names in this workspace. */
+    public int featureSetCount() {
+        return byName.size();
+    }
+
+    public List<FeatureSetDef> allLatest() {        List<FeatureSetDef> latest = new ArrayList<>();
         for (Map.Entry<String, NavigableMap<Integer, FeatureSetDef>> e : byName.entrySet()) {
             if (!e.getValue().isEmpty()) {
                 latest.add(e.getValue().lastEntry().getValue());

@@ -16,8 +16,12 @@ import java.util.TreeMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
- * Holds the three stores and a single read/write lock that serializes commits
+ * Holds the three stores, the per-workspace audit trail, the backfill
+ * idempotency table and a single read/write lock that serializes commits
  * against concurrent reads. Readers always observe a consistent snapshot.
+ *
+ * <p>One {@code StoreState} belongs to exactly one workspace; different
+ * workspaces never share stores, locks, audit entries or idempotency state.
  */
 public class StoreState {
 
@@ -25,7 +29,17 @@ public class StoreState {
     private final RegistryStore registry = new RegistryStore();
     private final OfflineStore offline = new OfflineStore();
     private final OnlineStore online = new OnlineStore();
+    private final AuditLog audit;
+    private final Map<String, List<String>> correlations = new LinkedHashMap<>();
     private volatile Runnable commitHook;
+
+    public StoreState() {
+        this(new AuditLog());
+    }
+
+    public StoreState(AuditLog audit) {
+        this.audit = audit;
+    }
 
     /**
      * Register a callback invoked (outside the commit write-lock) after every
@@ -58,14 +72,43 @@ public class StoreState {
         return online;
     }
 
-    /**
-     * Rebuild in-memory state from a persisted snapshot. Definitions are loaded
-     * as-is. Every point is appended to the offline store. Online chains are
-     * rebuilt by replay: points are applied in ingest order, and points hidden
-     * by a visible correction are dropped so each chain ends with the current
-     * value at each event time. Runs once before the app serves traffic.
-     */
+    public AuditLog audit() {
+        return audit;
+    }
+
+    /** Look up the recorded result of a completed backfill correlation. */
+    public List<String> correlationResult(String correlationId) {
+        return correlations.get(correlationId);
+    }
+
+    public boolean hasCorrelation(String correlationId) {
+        return correlations.containsKey(correlationId);
+    }
+
+    public void rememberCorrelation(String correlationId, List<String> pointIds) {
+        correlations.put(correlationId, List.copyOf(pointIds));
+    }
+
+    /** Snapshot of the idempotency table, used when persisting a workspace. */
+    public Map<String, List<String>> correlations() {
+        return Map.copyOf(correlations);
+    }
+
     public void bootstrap(List<FeatureSetDef> definitions, List<StoredPoint> points) {
+        bootstrap(definitions, points, Map.of());
+    }
+
+    /**
+     * Rebuild in-memory state from a persisted snapshot, also restoring the
+     * backfill idempotency table so replayed correlation ids stay idempotent
+     * across restarts. Definitions are loaded as-is. Every point is appended to
+     * the offline store. Online chains are rebuilt by replay: points are
+     * applied in ingest order, and points hidden by a visible correction are
+     * dropped so each chain ends with the current value at each event time.
+     * Runs once before the app serves traffic.
+     */
+    public void bootstrap(List<FeatureSetDef> definitions, List<StoredPoint> points,
+                          Map<String, List<String>> restoredCorrelations) {
         lock.writeLock().lock();
         try {
             definitions.forEach(registry::put);
@@ -94,6 +137,10 @@ public class StoreState {
                         .sorted(Comparator.comparingLong(StoredPoint::ingestTime))
                         .toList();
                 online.applyBatch(featureSet, version, ordered);
+            }
+            if (restoredCorrelations != null) {
+                restoredCorrelations.forEach((id, ids) ->
+                        correlations.put(id, List.copyOf(ids)));
             }
         } finally {
             lock.writeLock().unlock();

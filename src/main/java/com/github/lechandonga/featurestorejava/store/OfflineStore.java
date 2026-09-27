@@ -54,6 +54,15 @@ public class OfflineStore {
         return featureSet + "#" + version;
     }
 
+    /** Total number of persisted historical points in this workspace. */
+    public int totalPoints() {
+        int total = 0;
+        for (CopyOnWriteArrayList<StoredPoint> list : byFeatureSet.values()) {
+            total += list.size();
+        }
+        return total;
+    }
+
     /** Snapshot used by optional file persistence. */
     public List<StoredPoint> all() {
         List<StoredPoint> all = new ArrayList<>();

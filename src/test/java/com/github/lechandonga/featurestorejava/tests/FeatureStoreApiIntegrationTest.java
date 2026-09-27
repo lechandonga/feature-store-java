@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
@@ -11,7 +12,10 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
 import java.util.LinkedHashMap;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.UUID;
 import java.util.Map;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -24,9 +28,21 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * register -> write (rejected/accepted) -> online read -> backfill -> offline
  * read -> consistency/ops, plus structured conflict and rejection responses.
  */
-@SpringBootTest
+@SpringBootTest(properties = "feature-store.data-dir=${legacy.it.dir}")
 @AutoConfigureMockMvc
 class FeatureStoreApiIntegrationTest {
+
+    static final Path DATA_DIR = uniqueDataDir();
+
+    private static Path uniqueDataDir() {
+        try {
+            Path d = Files.createTempDirectory("legacy.it.dir-" + UUID.randomUUID());
+            System.setProperty("legacy.it.dir", d.toString());
+            return d;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
 
     @Autowired MockMvc mvc;
     private final ObjectMapper json = new ObjectMapper();

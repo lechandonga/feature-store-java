@@ -8,44 +8,59 @@ import com.github.lechandonga.featurestorejava.model.FreshnessReport;
 import com.github.lechandonga.featurestorejava.model.StaleEntity;
 import com.github.lechandonga.featurestorejava.model.StoredPoint;
 import com.github.lechandonga.featurestorejava.model.ValueStatus;
+import com.github.lechandonga.featurestorejava.workspace.WorkspaceManager;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Freshness and coverage observation.
+ * Freshness and coverage observation within one workspace.
  *
  * <p>Nothing is hidden behind a default value: an entity whose newest visible
  * point is older than the feature set TTL is listed as stale (and online reads
  * mark its features {@code EXPIRED}); coverage counts only genuinely
- * {@code PRESENT} (entity, feature) cells.
+ * {@code PRESENT} (entity, feature) cells. Workspaces are observed
+ * independently — statistics never include another workspace's data.
  */
 public class ObservabilityService {
 
-    private final StoreState state;
+    private final WorkspaceManager workspaces;
     private final FeatureRegistry registry;
     private final ReadService reads;
     private final TimeSource time;
 
-    public ObservabilityService(StoreState state, FeatureRegistry registry,
+    public ObservabilityService(WorkspaceManager workspaces, FeatureRegistry registry,
                                 ReadService reads, TimeSource time) {
-        this.state = state;
+        this.workspaces = workspaces;
         this.registry = registry;
         this.reads = reads;
         this.time = time;
     }
 
+    /** Backward-compatible constructor: observes the default workspace only. */
+    public ObservabilityService(StoreState state, FeatureRegistry registry,
+                                ReadService reads, TimeSource time) {
+        this(WorkspaceManager.wrappingDefault(state, time), registry, reads, time);
+    }
+
     public FreshnessReport freshness(String featureSet, Integer version, Long observedAt) {
+        return freshness(WorkspaceManager.DEFAULT_WORKSPACE, featureSet, version, observedAt);
+    }
+
+    public FreshnessReport freshness(String workspace, String featureSet, Integer version,
+                                     Long observedAt) {
+        String ws = WorkspaceManager.resolve(workspace);
+        StoreState state = workspaces.requireState(ws);
         long now = observedAt != null ? observedAt : time.now();
-        FeatureSetDef def = registry.requireVersion(featureSet, version);
+        FeatureSetDef def = registry.requireVersion(ws, featureSet, version);
 
         List<StaleEntity> stale = new ArrayList<>();
         state.lock().readLock().lock();
         try {
             List<String> entities = state.offline().entities(def.name(), def.version());
             for (String entity : entities) {
-                StoredPoint latest = reads.latestVisiblePoint(def, entity, now);
+                StoredPoint latest = reads.latestVisiblePoint(state, def, entity, now);
                 if (latest == null) {
                     continue; // nothing visible yet — covered by coverage report
                 }
@@ -65,8 +80,15 @@ public class ObservabilityService {
     }
 
     public CoverageReport coverage(String featureSet, Integer version, Long observedAt) {
+        return coverage(WorkspaceManager.DEFAULT_WORKSPACE, featureSet, version, observedAt);
+    }
+
+    public CoverageReport coverage(String workspace, String featureSet, Integer version,
+                                   Long observedAt) {
+        String ws = WorkspaceManager.resolve(workspace);
+        StoreState state = workspaces.requireState(ws);
         long now = observedAt != null ? observedAt : time.now();
-        FeatureSetDef def = registry.requireVersion(featureSet, version);
+        FeatureSetDef def = registry.requireVersion(ws, featureSet, version);
 
         int present;
         int entities;
@@ -76,7 +98,7 @@ public class ObservabilityService {
             entities = entityIds.size();
             int counted = 0;
             for (String entity : entityIds) {
-                Map<String, FeatureValue> values = reads.resolve(def, entity, now, false);
+                Map<String, FeatureValue> values = reads.resolve(state, def, entity, now, false);
                 for (FeatureValue fv : values.values()) {
                     if (fv.status() == ValueStatus.PRESENT) {
                         counted++;

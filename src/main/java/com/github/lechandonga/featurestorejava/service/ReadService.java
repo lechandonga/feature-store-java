@@ -9,6 +9,7 @@ import com.github.lechandonga.featurestorejava.model.OfflineResult;
 import com.github.lechandonga.featurestorejava.model.OnlineResult;
 import com.github.lechandonga.featurestorejava.model.StoredPoint;
 import com.github.lechandonga.featurestorejava.model.ValueStatus;
+import com.github.lechandonga.featurestorejava.workspace.WorkspaceManager;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -43,23 +44,35 @@ import java.util.Set;
  */
 public class ReadService {
 
-    private final StoreState state;
+    private final WorkspaceManager workspaces;
     private final FeatureRegistry registry;
     private final TimeSource time;
 
-    public ReadService(StoreState state, FeatureRegistry registry, TimeSource time) {
-        this.state = state;
+    public ReadService(WorkspaceManager workspaces, FeatureRegistry registry, TimeSource time) {
+        this.workspaces = workspaces;
         this.registry = registry;
         this.time = time;
     }
 
+    /** Backward-compatible constructor: reads the default workspace only. */
+    public ReadService(StoreState state, FeatureRegistry registry, TimeSource time) {
+        this(WorkspaceManager.wrappingDefault(state, time), registry, time);
+    }
+
     public OnlineResult online(String featureSet, Integer version, String entity, Long asOfTime) {
+        return online(WorkspaceManager.DEFAULT_WORKSPACE, featureSet, version, entity, asOfTime);
+    }
+
+    public OnlineResult online(String workspace, String featureSet, Integer version,
+                               String entity, Long asOfTime) {
+        String ws = WorkspaceManager.resolve(workspace);
+        StoreState state = workspaces.requireState(ws);
         long t = asOfTime != null ? asOfTime : time.now();
-        FeatureSetDef def = registry.requireVersion(featureSet, version);
+        FeatureSetDef def = registry.requireVersion(ws, featureSet, version);
         Map<String, FeatureValue> features;
         state.lock().readLock().lock();
         try {
-            features = resolve(def, entity, t, true);
+            features = resolve(state, def, entity, t, true);
         } finally {
             state.lock().readLock().unlock();
         }
@@ -68,12 +81,19 @@ public class ReadService {
 
     public List<OfflineResult> offline(String featureSet, Integer version,
                                        List<EntityAtPoint> targets) {
-        FeatureSetDef def = registry.requireVersion(featureSet, version);
+        return offline(WorkspaceManager.DEFAULT_WORKSPACE, featureSet, version, targets);
+    }
+
+    public List<OfflineResult> offline(String workspace, String featureSet, Integer version,
+                                       List<EntityAtPoint> targets) {
+        String ws = WorkspaceManager.resolve(workspace);
+        StoreState state = workspaces.requireState(ws);
+        FeatureSetDef def = registry.requireVersion(ws, featureSet, version);
         List<OfflineResult> results = new ArrayList<>();
         state.lock().readLock().lock();
         try {
             for (EntityAtPoint target : targets) {
-                Map<String, FeatureValue> features = resolve(def, target.entity(),
+                Map<String, FeatureValue> features = resolve(state, def, target.entity(),
                         target.asOfTime(), false);
                 results.add(new OfflineResult(featureSet, def.version(),
                         target.entity(), target.asOfTime(), features));
@@ -92,10 +112,16 @@ public class ReadService {
      * VALUE_MISMATCH rather than a genuine divergence.
      */
     public OnlineOfflinePair resolveBoth(FeatureSetDef def, String entity, long asOf) {
+        return resolveBoth(WorkspaceManager.DEFAULT_WORKSPACE, def, entity, asOf);
+    }
+
+    public OnlineOfflinePair resolveBoth(String workspace, FeatureSetDef def, String entity,
+                                         long asOf) {
+        StoreState state = workspaces.requireState(workspace);
         state.lock().readLock().lock();
         try {
-            Map<String, FeatureValue> online = resolve(def, entity, asOf, true);
-            Map<String, FeatureValue> offline = resolve(def, entity, asOf, false);
+            Map<String, FeatureValue> online = resolve(state, def, entity, asOf, true);
+            Map<String, FeatureValue> offline = resolve(state, def, entity, asOf, false);
             return new OnlineOfflinePair(online, offline);
         } finally {
             state.lock().readLock().unlock();
@@ -116,11 +142,11 @@ public class ReadService {
      *                       offline training point at T uses the value that was
      *                       valid then regardless of the present TTL
      */
-    Map<String, FeatureValue> resolve(FeatureSetDef def, String entity, long asOf,
-                                      boolean applyTtlOnline) {
+    Map<String, FeatureValue> resolve(StoreState state, FeatureSetDef def, String entity,
+                                      long asOf, boolean applyTtlOnline) {
         // newest visible point overall; a feature missing from it is treated as
         // missing rather than silently pulled from an older point
-        StoredPoint chosen = latestVisiblePoint(def, entity, asOf);
+        StoredPoint chosen = latestVisiblePoint(state, def, entity, asOf);
 
         Map<String, FeatureValue> out = new LinkedHashMap<>();
         for (FeatureDef f : def.features()) {
@@ -151,6 +177,11 @@ public class ReadService {
      * a point is hidden if a correction that supersedes it is itself visible.
      */
     StoredPoint latestVisiblePoint(FeatureSetDef def, String entity, long asOf) {
+        return latestVisiblePoint(workspaces.requireState(WorkspaceManager.DEFAULT_WORKSPACE),
+                def, entity, asOf);
+    }
+
+    StoredPoint latestVisiblePoint(StoreState state, FeatureSetDef def, String entity, long asOf) {
         List<StoredPoint> visible = state.offline().forFeatureSet(def.name(), def.version()).stream()
                 .filter(p -> p.entity().equals(entity))
                 .filter(p -> p.eventTime() <= asOf && p.ingestTime() <= asOf)

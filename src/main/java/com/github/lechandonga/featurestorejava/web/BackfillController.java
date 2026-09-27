@@ -5,6 +5,7 @@ import com.github.lechandonga.featurestorejava.model.BackfillResult;
 import com.github.lechandonga.featurestorejava.service.BackfillService;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -22,7 +23,9 @@ public class BackfillController {
     }
 
     @PostMapping
-    public BackfillResult backfill(@RequestBody BackfillRequest request) {
-        return backfills.backfill(request);
+    public BackfillResult backfill(
+            @RequestHeader(value = "X-Workspace", required = false) String workspace,
+            @RequestBody BackfillRequest request) {
+        return backfills.backfill(workspace, request);
     }
 }

@@ -23,7 +23,7 @@ public class StoreFixture {
 
     public final FixedTimeSource clock = new FixedTimeSource(T0);
     public final AuditLog audit = new AuditLog();
-    public final StoreState state = new StoreState();
+    public final StoreState state = new StoreState(audit);
     public final FeatureRegistry registry = new FeatureRegistry(state, audit, clock);
     public final WriteService writes = new WriteService(state, registry, audit, clock);
     public final ReadService reads = new ReadService(state, registry, clock);

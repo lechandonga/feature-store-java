@@ -1,5 +1,6 @@
 package com.github.lechandonga.featurestorejava.service;
 
+import com.github.lechandonga.featurestorejava.error.CapacityExceededException;
 import com.github.lechandonga.featurestorejava.error.ConflictDetail;
 import com.github.lechandonga.featurestorejava.error.DefinitionConflictException;
 import com.github.lechandonga.featurestorejava.error.NotFoundException;
@@ -7,6 +8,8 @@ import com.github.lechandonga.featurestorejava.model.ConflictReason;
 import com.github.lechandonga.featurestorejava.model.FeatureDef;
 import com.github.lechandonga.featurestorejava.model.FeatureSetDef;
 import com.github.lechandonga.featurestorejava.model.RegisterRequest;
+import com.github.lechandonga.featurestorejava.model.WorkspaceLimits;
+import com.github.lechandonga.featurestorejava.workspace.WorkspaceManager;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -17,7 +20,8 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * Feature registration and backward-compatible version evolution.
+ * Feature registration and backward-compatible version evolution, scoped to a
+ * caller-selected workspace.
  *
  * <p>Versioning rules (enforced at registration, never silently altered):
  * <ul>
@@ -33,38 +37,58 @@ import java.util.Set;
  *   <li>all detected conflicts are reported together; nothing is partially
  *       registered.</li>
  * </ul>
+ *
+ * <p>Each workspace has its own registry: the same feature set name may be
+ * registered with a completely different definition in another workspace. The
+ * workspace feature-set-count capacity limit is enforced on initial
+ * registration (evolution never adds a feature set, so it is not limited).
+ * Calls without a workspace argument target the default workspace.
  */
 public class FeatureRegistry {
 
-    private final StoreState state;
-    private final AuditLog audit;
+    private final WorkspaceManager workspaces;
     private final TimeSource time;
 
-    public FeatureRegistry(StoreState state, AuditLog audit, TimeSource time) {
-        this.state = state;
-        this.audit = audit;
+    public FeatureRegistry(WorkspaceManager workspaces, TimeSource time) {
+        this.workspaces = workspaces;
         this.time = time;
     }
 
+    /** Test/backward-compatible constructor: defaults-only workspace access. */
+    public FeatureRegistry(StoreState state, AuditLog audit, TimeSource time) {
+        this(defaultManager(state, audit, time), time);
+    }
+
+    private static WorkspaceManager defaultManager(StoreState state, AuditLog audit, TimeSource time) {
+        return WorkspaceManager.wrappingDefault(state, time);
+    }
+
     public FeatureSetDef register(RegisterRequest request) {
+        return register(WorkspaceManager.DEFAULT_WORKSPACE, request);
+    }
+
+    public FeatureSetDef register(String workspace, RegisterRequest request) {
+        StoreState state = workspaces.requireState(workspace);
+        String ws = WorkspaceManager.resolve(workspace);
         List<ConflictDetail> conflicts = new ArrayList<>();
         validateShape(request.name(), request.entityKey(), request.features(), conflicts);
         if (!conflicts.isEmpty()) {
-            throw conflict(request.name(), conflicts);
+            throw conflict(state, ws, request.name(), conflicts);
         }
         state.lock().writeLock().lock();
         try {
             if (state.registry().getLatest(request.name()) != null) {
                 conflicts.add(new ConflictDetail(ConflictReason.ALREADY_EXISTS, request.name(),
                         "feature set already exists; use the versions endpoint to evolve it"));
-                throw conflict(request.name(), conflicts);
+                throw conflict(state, ws, request.name(), conflicts);
             }
+            checkFeatureSetCapacity(state, ws, request.name());
             FeatureSetDef def = new FeatureSetDef(request.name(), 1, request.entityKey(),
                     request.ttlMillis(), List.copyOf(request.features()), time.now());
             state.registry().put(def);
-            audit.record("REGISTER", request.name(), 1, null, null, "ACCEPTED",
+            state.audit().record(ws, "REGISTER", request.name(), 1, null, null, "ACCEPTED",
                     "initial version registered",
-                    Map.of("featureCount", def.features().size()));
+                    Map.of("workspace", ws, "featureCount", def.features().size()));
             return def;
         } finally {
             state.lock().writeLock().unlock();
@@ -72,6 +96,13 @@ public class FeatureRegistry {
     }
 
     public FeatureSetDef evolve(String name, List<FeatureDef> features, Long ttlMillis) {
+        return evolve(WorkspaceManager.DEFAULT_WORKSPACE, name, features, ttlMillis);
+    }
+
+    public FeatureSetDef evolve(String workspace, String name, List<FeatureDef> features,
+                                Long ttlMillis) {
+        StoreState state = workspaces.requireState(workspace);
+        String ws = WorkspaceManager.resolve(workspace);
         List<ConflictDetail> conflicts = new ArrayList<>();
         validateShape(name, "evolve", features, conflicts);
         state.lock().writeLock().lock();
@@ -80,11 +111,11 @@ public class FeatureRegistry {
             if (latest == null) {
                 conflicts.add(0, new ConflictDetail(ConflictReason.FEATURE_SET_NOT_FOUND, name,
                         "register the feature set before evolving it"));
-                throw conflict(name, conflicts);
+                throw conflict(state, ws, name, conflicts);
             }
             compareVersions(latest, features, ttlMillis, conflicts);
             if (!conflicts.isEmpty()) {
-                throw conflict(name, conflicts);
+                throw conflict(state, ws, name, conflicts);
             }
             int nextVersion = latest.version() + 1;
             FeatureSetDef def = new FeatureSetDef(name, nextVersion, latest.entityKey(),
@@ -92,9 +123,10 @@ public class FeatureRegistry {
                     List.copyOf(features), time.now());
             state.registry().put(def);
             int added = features.size() - latest.features().size();
-            audit.record("EVOLVE", name, nextVersion, null, null, "ACCEPTED",
+            state.audit().record(ws, "EVOLVE", name, nextVersion, null, null, "ACCEPTED",
                     "compatible version: " + added + " feature(s) added",
-                    Map.of("previousVersion", latest.version(), "addedFeatures", added));
+                    Map.of("workspace", ws, "previousVersion", latest.version(),
+                            "addedFeatures", added));
             return def;
         } finally {
             state.lock().writeLock().unlock();
@@ -102,14 +134,43 @@ public class FeatureRegistry {
     }
 
     public FeatureSetDef requireVersion(String name, Integer version) {
+        return requireVersion(WorkspaceManager.DEFAULT_WORKSPACE, name, version);
+    }
+
+    public FeatureSetDef requireVersion(String workspace, String name, Integer version) {
+        StoreState state = workspaces.requireState(workspace);
         FeatureSetDef def = version == null
                 ? state.registry().getLatest(name)
                 : state.registry().getVersion(name, version);
         if (def == null) {
             throw new NotFoundException("feature set '" + name + "' version "
-                    + (version == null ? "<latest>" : version) + " not found");
+                    + (version == null ? "<latest>" : version) + " not found in workspace '"
+                    + WorkspaceManager.resolve(workspace) + "'");
         }
         return def;
+    }
+
+    /** Resolve the store state for callers that operate on a resolved version. */
+    public StoreState stateFor(String workspace) {
+        return workspaces.requireState(workspace);
+    }
+
+    private void checkFeatureSetCapacity(StoreState state, String ws, String featureSet) {
+        WorkspaceLimits limits = workspaces.require(ws).info().limits();
+        if (limits.maxFeatureSets() == null) {
+            return;
+        }
+        int current = state.registry().featureSetCount();
+        int limit = limits.maxFeatureSets();
+        if (current + 1 > limit) {
+            state.audit().record(ws, "REGISTER", featureSet, null, null, null, "REJECTED",
+                    "workspace feature-set capacity exceeded",
+                    Map.of("workspace", ws, "featureSet", featureSet,
+                            "dimension", "FEATURE_SETS", "limit", limit,
+                            "currentUsage", current, "requested", 1));
+            throw new CapacityExceededException(ws, featureSet, null, "FEATURE_SETS",
+                    limit, current, 1, Map.of("workspace", ws, "featureSet", featureSet));
+        }
     }
 
     // ---- validation -----------------------------------------------------
@@ -225,11 +286,12 @@ public class FeatureRegistry {
         return v == null ? null : f.type().normalize(v);
     }
 
-    private DefinitionConflictException conflict(String name, List<ConflictDetail> conflicts) {
-        audit.record("REGISTER_CONFLICT", name, null, null, null, "REJECTED",
+    private DefinitionConflictException conflict(StoreState state, String ws, String name,
+                                                 List<ConflictDetail> conflicts) {
+        state.audit().record(ws, "REGISTER_CONFLICT", name, null, null, null, "REJECTED",
                 conflicts.size() + " definition conflict(s)",
-                Map.of("conflicts", describe(conflicts)));
-        return new DefinitionConflictException(name, conflicts);
+                Map.of("workspace", ws, "conflicts", describe(conflicts)));
+        return new DefinitionConflictException(ws, name, conflicts);
     }
 
     private List<Map<String, Object>> describe(List<ConflictDetail> conflicts) {

@@ -33,16 +33,22 @@ public class AuditLog {
     public void record(String action, String featureSet, Integer version,
                        String entity, Long eventTime, String decision,
                        String reason, Map<String, Object> evidence) {
+        record(null, action, featureSet, version, entity, eventTime, decision, reason, evidence);
+    }
+
+    public void record(String workspace, String action, String featureSet, Integer version,
+                       String entity, Long eventTime, String decision,
+                       String reason, Map<String, Object> evidence) {
         AuditEntry entry;
         synchronized (ring) {
             long seq = ++sequence;
-            entry = new AuditEntry(System.currentTimeMillis(), action, featureSet, version,
-                    entity, eventTime, decision, reason,
+            entry = new AuditEntry(System.currentTimeMillis(), workspace, action, featureSet,
+                    version, entity, eventTime, decision, reason,
                     evidence == null ? Map.of() : Map.copyOf(evidence));
             ring.put(seq, entry);
         }
-        log.info("action={} featureSet={} version={} entity={} eventTime={} decision={} reason={} evidence={}",
-                action, featureSet, version, entity, eventTime, decision, reason,
+        log.info("workspace={} action={} featureSet={} version={} entity={} eventTime={} decision={} reason={} evidence={}",
+                workspace, action, featureSet, version, entity, eventTime, decision, reason,
                 entry.evidence());
     }
 
