@@ -6,6 +6,7 @@ import com.github.lechandonga.featurestorejava.service.BackfillService;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -22,7 +23,8 @@ public class BackfillController {
     }
 
     @PostMapping
-    public BackfillResult backfill(@RequestBody BackfillRequest request) {
-        return backfills.backfill(request);
+    public BackfillResult backfill(@RequestBody BackfillRequest request,
+                                   @RequestParam(required = false) String workspace) {
+        return backfills.backfill(workspace, request);
     }
 }

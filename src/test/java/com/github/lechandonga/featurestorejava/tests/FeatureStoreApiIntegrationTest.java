@@ -2,6 +2,7 @@ package com.github.lechandonga.featurestorejava.tests;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -10,6 +11,10 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -24,9 +29,27 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * register -> write (rejected/accepted) -> online read -> backfill -> offline
  * read -> consistency/ops, plus structured conflict and rejection responses.
  */
-@SpringBootTest
+@SpringBootTest(properties = "feature-store.data-dir=target/test-data/api-integration")
 @AutoConfigureMockMvc
 class FeatureStoreApiIntegrationTest {
+
+    @BeforeAll
+    static void cleanDataDir() throws IOException {
+        // the test registers fixed feature set names, so it must start from a
+        // pristine store regardless of previous local runs
+        Path dir = Path.of("target/test-data/api-integration");
+        if (Files.exists(dir)) {
+            try (var walk = Files.walk(dir)) {
+                walk.sorted(Comparator.reverseOrder()).forEach(p -> {
+                    try {
+                        Files.delete(p);
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+            }
+        }
+    }
 
     @Autowired MockMvc mvc;
     private final ObjectMapper json = new ObjectMapper();

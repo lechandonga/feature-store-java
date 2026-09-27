@@ -31,19 +31,22 @@ public class OpsController {
     @GetMapping("/freshness/{featureSet}")
     public FreshnessReport freshness(@PathVariable String featureSet,
                                      @RequestParam(required = false) Integer version,
-                                     @RequestParam(required = false) Long asOf) {
-        return ops.freshness(featureSet, version, asOf);
+                                     @RequestParam(required = false) Long asOf,
+                                     @RequestParam(required = false) String workspace) {
+        return ops.freshness(workspace, featureSet, version, asOf);
     }
 
     @GetMapping("/coverage/{featureSet}")
     public CoverageReport coverage(@PathVariable String featureSet,
                                    @RequestParam(required = false) Integer version,
-                                   @RequestParam(required = false) Long asOf) {
-        return ops.coverage(featureSet, version, asOf);
+                                   @RequestParam(required = false) Long asOf,
+                                   @RequestParam(required = false) String workspace) {
+        return ops.coverage(workspace, featureSet, version, asOf);
     }
 
     @GetMapping("/audit")
-    public List<AuditEntry> audit(@RequestParam(defaultValue = "50") int limit) {
-        return audit.recent(limit);
+    public List<AuditEntry> audit(@RequestParam(defaultValue = "50") int limit,
+                                  @RequestParam(required = false) String workspace) {
+        return workspace == null ? audit.recent(limit) : audit.recent(workspace, limit);
     }
 }

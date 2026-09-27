@@ -41,9 +41,16 @@ public class ConsistencyService {
         this.registry = registry;
     }
 
+    /** Check within the default workspace (pre-workspace call sites). */
     public ConsistencyReport check(String featureSet, Integer version,
                                    List<EntityAtPoint> targets) {
-        FeatureSetDef def = registry.requireVersion(featureSet, version);
+        return check(StoreState.DEFAULT_WORKSPACE, featureSet, version, targets);
+    }
+
+    public ConsistencyReport check(String workspace, String featureSet, Integer version,
+                                   List<EntityAtPoint> targets) {
+        String ws = StoreState.normalizeWorkspace(workspace);
+        FeatureSetDef def = registry.requireVersion(ws, featureSet, version);
         List<ConsistencyIssue> issues = new ArrayList<>();
         if (targets == null) {
             targets = List.of();
@@ -51,7 +58,7 @@ public class ConsistencyService {
         for (EntityAtPoint target : targets) {
             // both views come from one snapshot / one read-lock critical section
             ReadService.OnlineOfflinePair pair =
-                    reads.resolveBoth(def, target.entity(), target.asOfTime());
+                    reads.resolveBoth(ws, def, target.entity(), target.asOfTime());
             Map<String, FeatureValue> onlineMap = pair.online();
             Map<String, FeatureValue> offlineMap = pair.offline();
 

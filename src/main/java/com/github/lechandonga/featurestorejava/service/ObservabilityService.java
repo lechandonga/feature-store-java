@@ -36,16 +36,23 @@ public class ObservabilityService {
         this.time = time;
     }
 
+    /** Freshness of a set in the default workspace (pre-workspace call sites). */
     public FreshnessReport freshness(String featureSet, Integer version, Long observedAt) {
+        return freshness(StoreState.DEFAULT_WORKSPACE, featureSet, version, observedAt);
+    }
+
+    public FreshnessReport freshness(String workspace, String featureSet, Integer version,
+                                     Long observedAt) {
+        String ws = StoreState.normalizeWorkspace(workspace);
         long now = observedAt != null ? observedAt : time.now();
-        FeatureSetDef def = registry.requireVersion(featureSet, version);
+        FeatureSetDef def = registry.requireVersion(ws, featureSet, version);
 
         List<StaleEntity> stale = new ArrayList<>();
         state.lock().readLock().lock();
         try {
-            List<String> entities = state.offline().entities(def.name(), def.version());
+            List<String> entities = state.offline(ws).entities(def.name(), def.version());
             for (String entity : entities) {
-                StoredPoint latest = reads.latestVisiblePoint(def, entity, now);
+                StoredPoint latest = reads.latestVisiblePoint(ws, def, entity, now);
                 if (latest == null) {
                     continue; // nothing visible yet — covered by coverage report
                 }
@@ -64,19 +71,26 @@ public class ObservabilityService {
                 fresh, List.copyOf(stale));
     }
 
+    /** Coverage of a set in the default workspace (pre-workspace call sites). */
     public CoverageReport coverage(String featureSet, Integer version, Long observedAt) {
+        return coverage(StoreState.DEFAULT_WORKSPACE, featureSet, version, observedAt);
+    }
+
+    public CoverageReport coverage(String workspace, String featureSet, Integer version,
+                                   Long observedAt) {
+        String ws = StoreState.normalizeWorkspace(workspace);
         long now = observedAt != null ? observedAt : time.now();
-        FeatureSetDef def = registry.requireVersion(featureSet, version);
+        FeatureSetDef def = registry.requireVersion(ws, featureSet, version);
 
         int present;
         int entities;
         state.lock().readLock().lock();
         try {
-            List<String> entityIds = state.offline().entities(def.name(), def.version());
+            List<String> entityIds = state.offline(ws).entities(def.name(), def.version());
             entities = entityIds.size();
             int counted = 0;
             for (String entity : entityIds) {
-                Map<String, FeatureValue> values = reads.resolve(def, entity, now, false);
+                Map<String, FeatureValue> values = reads.resolve(ws, def, entity, now, false);
                 for (FeatureValue fv : values.values()) {
                     if (fv.status() == ValueStatus.PRESENT) {
                         counted++;

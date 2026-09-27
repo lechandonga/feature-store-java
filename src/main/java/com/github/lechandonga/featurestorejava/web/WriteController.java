@@ -6,6 +6,7 @@ import com.github.lechandonga.featurestorejava.service.WriteService;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -22,7 +23,8 @@ public class WriteController {
     }
 
     @PostMapping
-    public WriteResult write(@RequestBody WriteBatch batch) {
-        return writes.submit(batch);
+    public WriteResult write(@RequestBody WriteBatch batch,
+                             @RequestParam(required = false) String workspace) {
+        return writes.submit(workspace, batch);
     }
 }

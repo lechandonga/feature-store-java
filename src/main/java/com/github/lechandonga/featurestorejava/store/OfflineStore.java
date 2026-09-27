@@ -54,6 +54,15 @@ public class OfflineStore {
         return featureSet + "#" + version;
     }
 
+    /** Total number of stored points (capacity accounting). */
+    public long totalCount() {
+        long n = 0;
+        for (CopyOnWriteArrayList<StoredPoint> list : byFeatureSet.values()) {
+            n += list.size();
+        }
+        return n;
+    }
+
     /** Snapshot used by optional file persistence. */
     public List<StoredPoint> all() {
         List<StoredPoint> all = new ArrayList<>();

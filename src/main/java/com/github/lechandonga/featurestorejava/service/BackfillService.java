@@ -2,6 +2,7 @@ package com.github.lechandonga.featurestorejava.service;
 
 import com.github.lechandonga.featurestorejava.error.BatchRejectedException;
 import com.github.lechandonga.featurestorejava.error.NotFoundException;
+import com.github.lechandonga.featurestorejava.error.WorkspaceCapacityExceededException;
 import com.github.lechandonga.featurestorejava.model.Correction;
 import com.github.lechandonga.featurestorejava.model.FeatureDef;
 import com.github.lechandonga.featurestorejava.model.FeatureSetDef;
@@ -42,7 +43,8 @@ import java.util.UUID;
  *
  * <p>A {@code correlationId} makes a recompute job idempotent: replaying an
  * already applied correlation returns the previous result instead of appending
- * a second correction layer.
+ * a second correction layer. Idempotency records live in the per-workspace
+ * state and are persisted with the snapshot, so they survive restarts.
  */
 public class BackfillService {
 
@@ -50,7 +52,6 @@ public class BackfillService {
     private final FeatureRegistry registry;
     private final AuditLog audit;
     private final TimeSource time;
-    private final Map<String, List<String>> appliedByCorrelation = new LinkedHashMap<>();
 
     public BackfillService(StoreState state, FeatureRegistry registry, AuditLog audit,
                            TimeSource time) {
@@ -60,7 +61,13 @@ public class BackfillService {
         this.time = time;
     }
 
+    /** Backfill within the default workspace (pre-workspace call sites). */
     public BackfillResult backfill(BackfillRequest request) {
+        return backfill(StoreState.DEFAULT_WORKSPACE, request);
+    }
+
+    public BackfillResult backfill(String workspace, BackfillRequest request) {
+        String ws = StoreState.normalizeWorkspace(workspace);
         if (request == null) {
             throw new BatchRejectedException(null, null,
                     List.of(reject(-1, null, null, RejectionReason.EMPTY_BACKFILL,
@@ -68,7 +75,7 @@ public class BackfillService {
         }
         FeatureSetDef def;
         try {
-            def = registry.requireVersion(request.featureSet(),
+            def = registry.requireVersion(ws, request.featureSet(),
                     request.version() == 0 ? null : request.version());
         } catch (NotFoundException e) {
             throw new BatchRejectedException(request.featureSet(), request.version(),
@@ -79,11 +86,12 @@ public class BackfillService {
         boolean committed = false;
         state.lock().writeLock().lock();
         try {
+            Map<String, List<String>> appliedByCorrelation = state.correlations(ws);
             // idempotent replay of a completed recompute job
             if (request.correlationId() != null
                     && appliedByCorrelation.containsKey(request.correlationId())) {
                 List<String> ids = appliedByCorrelation.get(request.correlationId());
-                audit.record("BACKFILL", def.name(), def.version(), null, null, "ACCEPTED",
+                audit.record(ws, "BACKFILL", def.name(), def.version(), null, null, "ACCEPTED",
                         "idempotent replay of correlationId " + request.correlationId(),
                         Map.of("pointIds", ids, "idempotent", true));
                 return new BackfillResult(ids.size(), List.copyOf(ids));
@@ -91,13 +99,25 @@ public class BackfillService {
 
             List<RowRejection> rejections = new ArrayList<>();
             if (request.corrections() == null || request.corrections().isEmpty()) {
-                throw rejected(def, List.of(reject(-1, null, null,
+                throw rejected(ws, def, List.of(reject(-1, null, null,
                         RejectionReason.EMPTY_BACKFILL,
                         "a backfill must contain at least one correction", Map.of())));
             }
-            List<StoredPoint> validated = validate(def, request.corrections(), rejections);
+            List<StoredPoint> validated = validate(ws, def, request.corrections(), rejections);
             if (!rejections.isEmpty()) {
-                throw rejected(def, rejections);
+                throw rejected(ws, def, rejections);
+            }
+
+            // whole-batch capacity check: on overflow no correction is appended
+            try {
+                state.ensurePointCapacity(ws, def.name(), validated.size());
+            } catch (WorkspaceCapacityExceededException cap) {
+                audit.record(ws, "BACKFILL", def.name(), def.version(), null, null, "REJECTED",
+                        "workspace capacity exceeded on " + cap.getDimension()
+                                + "; backfill rejected atomically",
+                        Map.of("dimension", cap.getDimension(), "limit", cap.getLimit(),
+                                "current", cap.getCurrent(), "requested", cap.getRequested()));
+                throw cap;
             }
 
             long ingestTime = time.now();
@@ -107,16 +127,16 @@ public class BackfillService {
                 StoredPoint p = new StoredPoint(UUID.randomUUID().toString(), def.name(),
                         def.version(), v.entity(), v.eventTime(), ingestTime, v.values(),
                         v.supersedes(), "BACKFILL", v.reason());
-                state.offline().append(p);
+                state.offline(ws).append(p);
                 appended.add(p);
                 ids.add(p.id());
             }
             // one atomic online chain switch for the entire recompute batch
-            state.online().applyBatch(def.name(), def.version(), appended);
+            state.online(ws).applyBatch(def.name(), def.version(), appended);
             if (request.correlationId() != null) {
                 appliedByCorrelation.put(request.correlationId(), List.copyOf(ids));
             }
-            audit.record("BACKFILL", def.name(), def.version(), null, null, "ACCEPTED",
+            audit.record(ws, "BACKFILL", def.name(), def.version(), null, null, "ACCEPTED",
                     "recompute committed atomically; past as-of views unchanged",
                     Map.of("corrections", ids.size(), "ingestTime", ingestTime,
                             "pointIds", ids,
@@ -131,7 +151,8 @@ public class BackfillService {
         }
     }
 
-    private List<StoredPoint> validate(FeatureSetDef def, List<Correction> corrections,
+    private List<StoredPoint> validate(String ws, FeatureSetDef def,
+                                       List<Correction> corrections,
                                        List<RowRejection> rejections) {
         Map<String, FeatureDef> declared = new LinkedHashMap<>();
         for (FeatureDef f : def.features()) {
@@ -149,11 +170,26 @@ public class BackfillService {
                 rejections.addAll(row);
                 continue;
             }
-            StoredPoint target = state.offline().getPoint(c.targetPointId());
+            StoredPoint target = state.offline(ws).getPoint(c.targetPointId());
             if (target == null) {
-                row.add(reject(i, c.entity(), c.eventTime(), RejectionReason.TARGET_POINT_NOT_FOUND,
-                        "no stored point with id " + c.targetPointId(),
-                        Map.of("targetPointId", c.targetPointId())));
+                // distinguish "no such point at all" from "point lives in
+                // another workspace" — the latter is a cross-workspace access
+                String owner = state.workspaceOfPoint(c.targetPointId());
+                if (owner != null) {
+                    row.add(reject(i, c.entity(), c.eventTime(),
+                            RejectionReason.CROSS_WORKSPACE_ACCESS,
+                            "point " + c.targetPointId() + " belongs to workspace '" + owner
+                                    + "' and cannot be corrected from workspace '" + ws + "'",
+                            Map.of("targetPointId", c.targetPointId(),
+                                    "ownerWorkspace", owner,
+                                    "requestedWorkspace", ws)));
+                } else {
+                    row.add(reject(i, c.entity(), c.eventTime(),
+                            RejectionReason.TARGET_POINT_NOT_FOUND,
+                            "no stored point with id " + c.targetPointId()
+                                    + " in workspace '" + ws + "'",
+                            Map.of("targetPointId", c.targetPointId())));
+                }
             } else {
                 if (!target.featureSet().equals(def.name()) || target.version() != def.version()) {
                     row.add(reject(i, target.entity(), target.eventTime(),
@@ -243,14 +279,15 @@ public class BackfillService {
         return validated;
     }
 
-    private BatchRejectedException rejected(FeatureSetDef def, List<RowRejection> rejections) {
+    private BatchRejectedException rejected(String ws, FeatureSetDef def,
+                                            List<RowRejection> rejections) {
         for (RowRejection r : rejections) {
             Map<String, Object> evidence = new LinkedHashMap<>(r.evidence());
             evidence.put("rowIndex", r.rowIndex());
-            audit.record("BACKFILL_ROW", def.name(), def.version(), r.entity(), r.eventTime(),
+            audit.record(ws, "BACKFILL_ROW", def.name(), def.version(), r.entity(), r.eventTime(),
                     "REJECTED", r.reason().name() + ": " + r.detail(), evidence);
         }
-        audit.record("BACKFILL", def.name(), def.version(), null, null, "REJECTED",
+        audit.record(ws, "BACKFILL", def.name(), def.version(), null, null, "REJECTED",
                 "backfill validation failed; state unchanged (" + rejections.size()
                         + " violation(s))",
                 Map.of("violations", rejections.size()));

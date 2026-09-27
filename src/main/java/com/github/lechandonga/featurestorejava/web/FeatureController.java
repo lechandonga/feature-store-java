@@ -27,19 +27,22 @@ public class FeatureController {
     }
 
     @PostMapping
-    public FeatureSetDef register(@RequestBody RegisterRequest request) {
-        return registry.register(request);
+    public FeatureSetDef register(@RequestBody RegisterRequest request,
+                                  @RequestParam(required = false) String workspace) {
+        return registry.register(workspace, request);
     }
 
     @PostMapping("/{name}/versions")
     public FeatureSetDef evolve(@PathVariable String name,
                                 @RequestParam(required = false) Long ttlMillis,
+                                @RequestParam(required = false) String workspace,
                                 @RequestBody List<com.github.lechandonga.featurestorejava.model.FeatureDef> features) {
-        return registry.evolve(name, features, ttlMillis);
+        return registry.evolve(workspace, name, features, ttlMillis);
     }
 
     @GetMapping("/{name}/versions/{version}")
-    public FeatureSetDef version(@PathVariable String name, @PathVariable int version) {
-        return registry.requireVersion(name, version);
+    public FeatureSetDef version(@PathVariable String name, @PathVariable int version,
+                                 @RequestParam(required = false) String workspace) {
+        return registry.requireVersion(workspace, name, version);
     }
 }

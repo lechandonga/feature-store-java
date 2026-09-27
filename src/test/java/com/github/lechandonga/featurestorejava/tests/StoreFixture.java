@@ -10,6 +10,7 @@ import com.github.lechandonga.featurestorejava.service.FeatureRegistry;
 import com.github.lechandonga.featurestorejava.service.ObservabilityService;
 import com.github.lechandonga.featurestorejava.service.ReadService;
 import com.github.lechandonga.featurestorejava.service.StoreState;
+import com.github.lechandonga.featurestorejava.service.WorkspaceService;
 import com.github.lechandonga.featurestorejava.service.WriteService;
 
 import java.util.List;
@@ -30,6 +31,7 @@ public class StoreFixture {
     public final BackfillService backfills = new BackfillService(state, registry, audit, clock);
     public final ConsistencyService consistency = new ConsistencyService(reads, registry);
     public final ObservabilityService ops = new ObservabilityService(state, registry, reads, clock);
+    public final WorkspaceService workspaces = new WorkspaceService(state, audit, clock);
 
     public static FeatureDef feature(String name, ValueType type, boolean required,
                                      Object defaultValue, MissingPolicy policy) {

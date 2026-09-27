@@ -8,6 +8,7 @@ import com.github.lechandonga.featurestorejava.service.ObservabilityService;
 import com.github.lechandonga.featurestorejava.service.ReadService;
 import com.github.lechandonga.featurestorejava.service.StoreState;
 import com.github.lechandonga.featurestorejava.service.TimeSource;
+import com.github.lechandonga.featurestorejava.service.WorkspaceService;
 import com.github.lechandonga.featurestorejava.service.WriteService;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -31,6 +32,11 @@ public class ServiceConfig {
     @Bean
     public StoreState storeState() {
         return new StoreState();
+    }
+
+    @Bean
+    public WorkspaceService workspaceService(StoreState state, AuditLog audit, TimeSource time) {
+        return new WorkspaceService(state, audit, time);
     }
 
     @Bean

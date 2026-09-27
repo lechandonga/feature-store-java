@@ -34,21 +34,24 @@ public class ReadController {
     public OnlineResult online(@PathVariable String featureSet,
                                @PathVariable String entity,
                                @RequestParam(required = false) Integer version,
-                               @RequestParam(required = false) Long asOf) {
-        return reads.online(featureSet, version, entity, asOf);
+                               @RequestParam(required = false) Long asOf,
+                               @RequestParam(required = false) String workspace) {
+        return reads.online(workspace, featureSet, version, entity, asOf);
     }
 
     @PostMapping("/offline/{featureSet}")
     public List<OfflineResult> offline(@PathVariable String featureSet,
                                        @RequestParam(required = false) Integer version,
+                                       @RequestParam(required = false) String workspace,
                                        @RequestBody List<EntityAtPoint> targets) {
-        return reads.offline(featureSet, version, targets);
+        return reads.offline(workspace, featureSet, version, targets);
     }
 
     @PostMapping("/consistency/{featureSet}")
     public Object check(@PathVariable String featureSet,
                         @RequestParam(required = false) Integer version,
+                        @RequestParam(required = false) String workspace,
                         @RequestBody List<EntityAtPoint> targets) {
-        return consistency.check(featureSet, version, targets);
+        return consistency.check(workspace, featureSet, version, targets);
     }
 }

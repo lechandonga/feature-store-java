@@ -53,27 +53,41 @@ public class ReadService {
         this.time = time;
     }
 
+    /** Online read from the default workspace (pre-workspace call sites). */
     public OnlineResult online(String featureSet, Integer version, String entity, Long asOfTime) {
+        return online(StoreState.DEFAULT_WORKSPACE, featureSet, version, entity, asOfTime);
+    }
+
+    public OnlineResult online(String workspace, String featureSet, Integer version,
+                               String entity, Long asOfTime) {
+        String ws = StoreState.normalizeWorkspace(workspace);
         long t = asOfTime != null ? asOfTime : time.now();
-        FeatureSetDef def = registry.requireVersion(featureSet, version);
+        FeatureSetDef def = registry.requireVersion(ws, featureSet, version);
         Map<String, FeatureValue> features;
         state.lock().readLock().lock();
         try {
-            features = resolve(def, entity, t, true);
+            features = resolve(ws, def, entity, t, true);
         } finally {
             state.lock().readLock().unlock();
         }
         return new OnlineResult(featureSet, def.version(), entity, t, features);
     }
 
+    /** Offline read from the default workspace (pre-workspace call sites). */
     public List<OfflineResult> offline(String featureSet, Integer version,
                                        List<EntityAtPoint> targets) {
-        FeatureSetDef def = registry.requireVersion(featureSet, version);
+        return offline(StoreState.DEFAULT_WORKSPACE, featureSet, version, targets);
+    }
+
+    public List<OfflineResult> offline(String workspace, String featureSet, Integer version,
+                                       List<EntityAtPoint> targets) {
+        String ws = StoreState.normalizeWorkspace(workspace);
+        FeatureSetDef def = registry.requireVersion(ws, featureSet, version);
         List<OfflineResult> results = new ArrayList<>();
         state.lock().readLock().lock();
         try {
             for (EntityAtPoint target : targets) {
-                Map<String, FeatureValue> features = resolve(def, target.entity(),
+                Map<String, FeatureValue> features = resolve(ws, def, target.entity(),
                         target.asOfTime(), false);
                 results.add(new OfflineResult(featureSet, def.version(),
                         target.entity(), target.asOfTime(), features));
@@ -92,10 +106,14 @@ public class ReadService {
      * VALUE_MISMATCH rather than a genuine divergence.
      */
     public OnlineOfflinePair resolveBoth(FeatureSetDef def, String entity, long asOf) {
+        return resolveBoth(StoreState.DEFAULT_WORKSPACE, def, entity, asOf);
+    }
+
+    public OnlineOfflinePair resolveBoth(String ws, FeatureSetDef def, String entity, long asOf) {
         state.lock().readLock().lock();
         try {
-            Map<String, FeatureValue> online = resolve(def, entity, asOf, true);
-            Map<String, FeatureValue> offline = resolve(def, entity, asOf, false);
+            Map<String, FeatureValue> online = resolve(ws, def, entity, asOf, true);
+            Map<String, FeatureValue> offline = resolve(ws, def, entity, asOf, false);
             return new OnlineOfflinePair(online, offline);
         } finally {
             state.lock().readLock().unlock();
@@ -118,9 +136,14 @@ public class ReadService {
      */
     Map<String, FeatureValue> resolve(FeatureSetDef def, String entity, long asOf,
                                       boolean applyTtlOnline) {
+        return resolve(StoreState.DEFAULT_WORKSPACE, def, entity, asOf, applyTtlOnline);
+    }
+
+    Map<String, FeatureValue> resolve(String ws, FeatureSetDef def, String entity, long asOf,
+                                      boolean applyTtlOnline) {
         // newest visible point overall; a feature missing from it is treated as
         // missing rather than silently pulled from an older point
-        StoredPoint chosen = latestVisiblePoint(def, entity, asOf);
+        StoredPoint chosen = latestVisiblePoint(ws, def, entity, asOf);
 
         Map<String, FeatureValue> out = new LinkedHashMap<>();
         for (FeatureDef f : def.features()) {
@@ -151,7 +174,11 @@ public class ReadService {
      * a point is hidden if a correction that supersedes it is itself visible.
      */
     StoredPoint latestVisiblePoint(FeatureSetDef def, String entity, long asOf) {
-        List<StoredPoint> visible = state.offline().forFeatureSet(def.name(), def.version()).stream()
+        return latestVisiblePoint(StoreState.DEFAULT_WORKSPACE, def, entity, asOf);
+    }
+
+    StoredPoint latestVisiblePoint(String ws, FeatureSetDef def, String entity, long asOf) {
+        List<StoredPoint> visible = state.offline(ws).forFeatureSet(def.name(), def.version()).stream()
                 .filter(p -> p.entity().equals(entity))
                 .filter(p -> p.eventTime() <= asOf && p.ingestTime() <= asOf)
                 .sorted((a, b) -> a.eventTime() != b.eventTime()
